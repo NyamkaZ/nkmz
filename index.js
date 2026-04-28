@@ -1,8 +1,8 @@
 // index.js - Main Express server (Vercel entry point)
 const express = require('express');
-const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const cors = require('cors');
+const jwt = require('jsonwebtoken');
 const { getConnection } = require('./lib/db');
 
 const app = express();
@@ -12,29 +12,25 @@ const allowedOrigin = process.env.FRONTEND_URL || 'http://localhost';
 
 app.use(cors({
   origin: allowedOrigin,
-  credentials: true
+  credentials: false // No need for credentials with JWT
 }));
 
 app.use(express.json());
 
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'change-this-secret',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    secure: process.env.NODE_ENV === 'production',
-    httpOnly: true,
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    maxAge: 3600 * 1000 // 1 hour
-  }
-}));
-
 // ─── Auth Middleware ──────────────────────────────────────────
 function requireAdmin(req, res, next) {
-  if (!req.session?.admin_logged_in) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  next();
+  const token = authHeader.substring(7);
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'change-this-secret');
+    req.admin = decoded;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
 }
 
 // ─── Routes ──────────────────────────────────────────────────
@@ -62,9 +58,8 @@ app.post('/api/login', async (req, res) => {
     : password === adminPassword;
 
   if (usernameMatch && passwordMatch) {
-    req.session.admin_logged_in = true;
-    req.session.admin_username = username;
-    return res.json({ success: true, username });
+    const token = jwt.sign({ username }, process.env.JWT_SECRET || 'change-this-secret', { expiresIn: '1h' });
+    return res.json({ success: true, token, username });
   }
 
   return res.status(401).json({ error: 'Invalid username or password' });
@@ -72,16 +67,13 @@ app.post('/api/login', async (req, res) => {
 
 // POST /api/logout
 app.post('/api/logout', (req, res) => {
-  req.session.destroy();
+  // For JWT, logout is handled on client side by removing token
   res.json({ success: true });
 });
 
 // GET /api/auth/check
-app.get('/api/auth/check', (req, res) => {
-  if (req.session?.admin_logged_in) {
-    return res.json({ loggedIn: true, username: req.session.admin_username });
-  }
-  res.json({ loggedIn: false });
+app.get('/api/auth/check', requireAdmin, (req, res) => {
+  res.json({ loggedIn: true, username: req.admin.username });
 });
 
 // GET /api/data  — list all entries
